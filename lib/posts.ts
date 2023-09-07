@@ -1,58 +1,128 @@
-import fs from "fs";
-import path from "path";
-import matter from "gray-matter";
-import { remark } from "remark";
-import html from "remark-html";
+// Import required modules and components
+import { compileMDX } from "next-mdx-remote/rsc";
+import rehypeAutolinkHeadings from "rehype-autolink-headings/lib";
+import rehypeHighlight from "rehype-highlight/lib";
+import rehypeSlug from "rehype-slug";
+import Video from "@/app/components/Video";
+import CustomImage from "@/app/components/CustomImage";
 
-const postsDirectory = path.join(process.cwd(), "blogposts");
+// Define the type for the GitHub repository file tree
+type Filetree = {
+  tree: [
+    {
+      path: string;
+    }
+  ];
+};
 
-export function getSortedPostsData() {
-  // Get file names under /posts
-  const fileNames = fs.readdirSync(postsDirectory);
-  const allPostsData = fileNames.map((fileName) => {
-    // Remove ".md" from file name to get id
-    const id = fileName.replace(/\.md$/, "");
+// Function to fetch and compile a single blog post by its file name
+export async function getPostByName(
+  fileName: string
+): Promise<BlogPost | undefined> {
+  // Fetch the raw MDX content from GitHub
+  const res = await fetch(
+    `https://raw.githubusercontent.com/stonediggity/mdx-library/main/${fileName}`,
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Cache-Control": "no-cache",
+      },
+    }
+  );
 
-    // Read markdown file as string
-    const fullPath = path.join(postsDirectory, fileName);
-    const fileContents = fs.readFileSync(fullPath, "utf8");
+  // If the fetch fails, return undefined
+  if (!res.ok) return undefined;
 
-    // Use gray-matter to parse the post metadata section
-    const matterResult = matter(fileContents);
+  // Parse the raw MDX content
+  const rawMDX = await res.text();
 
-    const blogPost: BlogPost = {
-      id,
-      title: matterResult.data.title,
-      date: matterResult.data.date,
-    };
+  // If the content is not found, return undefined
+  if (rawMDX === "404: Not Found") return undefined;
 
-    // Combine the data with the id
-    return blogPost;
+  // Compile the MDX content and extract frontmatter
+  const { frontmatter, content } = await compileMDX<{
+    title: string;
+    date: string;
+    tags: string[];
+  }>({
+    source: rawMDX,
+    components: {
+      Video,
+      CustomImage,
+    },
+    options: {
+      parseFrontmatter: true,
+      mdxOptions: {
+        rehypePlugins: [
+          rehypeHighlight,
+          rehypeSlug,
+          [
+            rehypeAutolinkHeadings,
+            {
+              behavior: "wrap",
+            },
+          ],
+        ],
+      },
+    },
   });
-  // Sort posts by date
-  return allPostsData.sort((a, b) => (a.date < b.date ? 1 : -1));
-}
 
-export async function getPostData(id: string) {
-  const fullPath = path.join(postsDirectory, `${id}.md`);
-  const fileContents = fs.readFileSync(fullPath, "utf8");
-
-  // Use gray-matter to parse the post metadata section
-  const matterResult = matter(fileContents);
-
-  const processedContent = await remark()
-    .use(html)
-    .process(matterResult.content);
-
-  const contentHtml = processedContent.toString();
-
-  const blogPostWithHTML: BlogPost & { contentHtml: string } = {
-    id,
-    title: matterResult.data.title,
-    date: matterResult.data.date,
-    contentHtml,
+  // Create a blog post object, id picked from file name (strip .mdx )
+  const id = fileName.replace(/\.mdx$/, "");
+  const blogPostObj: BlogPost = {
+    meta: {
+      id,
+      title: frontmatter.title,
+      date: frontmatter.date,
+      tags: frontmatter.tags,
+    },
+    content,
   };
 
-  // Combine the data with the id
-  return blogPostWithHTML;
+  // Return the blog post object
+  return blogPostObj;
+}
+
+// Function to fetch metadata for all blog posts
+export async function getPostsMeta(): Promise<Meta[] | undefined> {
+  // Fetch the file tree from the GitHub repository
+  const res = await fetch(
+    "https://api.github.com/repos/stonediggity/mdx-library/git/trees/main?recursive=1",
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Cache-Control": "no-cache",
+      },
+    }
+  );
+
+  // If the fetch fails, return undefined
+  if (!res.ok) return undefined;
+
+  // Parse the JSON response to get the file tree
+  const repoFiletree: Filetree = await res.json();
+
+  // Filter out MDX files from the file tree
+  const filesArray = repoFiletree.tree
+    .map((obj) => obj.path)
+    .filter((path) => path.endsWith(".mdx"));
+
+  // Initialize an array to hold post metadata
+  const posts: Meta[] = [];
+
+  // Loop through each MDX file to fetch its metadata
+  for (const file of filesArray) {
+    const post = await getPostByName(file);
+    if (post) {
+      const { meta } = post;
+      posts.push(meta);
+    }
+  }
+
+  // Sort the posts by date and return
+  return posts.sort((a, b) => (a.date < b.date ? 1 : -1));
 }
